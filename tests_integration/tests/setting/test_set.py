@@ -113,3 +113,31 @@ def test_set_big_value():
         json="",
     )
     result.raise_for_status()
+
+
+def test_set_and_unset_extra_fields():
+    """Test setting and resetting an extra_fields_* setting through the generic setting endpoint.
+
+    The setting must report is_set=True once written and is_set=False (default value) once reset.
+    """
+    field = {"key": "settingfield", "name": "Setting field", "field_type": "text"}
+
+    # Set
+    result = httpx.post(
+        f"{URL}/api/v1/setting/extra_fields_vendor",
+        json=json.dumps([field]),
+    )
+    result.raise_for_status()
+    body = result.json()
+    assert body["is_set"] is True
+    assert body["type"] == "array"
+
+    # Unset (reset to default)
+    result = httpx.post(
+        f"{URL}/api/v1/setting/extra_fields_vendor",
+        json="",
+    )
+    result.raise_for_status()
+    body = result.json()
+    assert body["is_set"] is False
+    assert json.loads(body["value"]) == []

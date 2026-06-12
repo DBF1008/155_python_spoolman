@@ -12,6 +12,7 @@ from spoolman.api.v1.models import Message, SettingEvent, SettingResponse
 from spoolman.database import setting
 from spoolman.database.database import get_db_session
 from spoolman.exceptions import ItemNotFoundError
+from spoolman.extra_fields import apply_extra_fields_setting, entity_type_for_setting_key, reset_extra_fields
 from spoolman.settings import SETTINGS, parse_setting
 from spoolman.ws import websocket_manager
 
@@ -164,16 +165,28 @@ async def update(
     except ValueError as e:
         return JSONResponse(status_code=404, content=Message(message=str(e)).dict())
 
-    if body and body != "null":
-        try:
-            definition.validate_type(body)
-        except ValueError as e:
-            return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
+    # Writes to the extra_fields_* settings are routed through the shared extra-fields implementation so
+    # that validation, cache invalidation and orphaned-value cleanup match the dedicated /field endpoints.
+    entity_type = entity_type_for_setting_key(key)
 
-        await setting.update(db=db, definition=definition, value=body)
+    if body and body != "null":
+        if entity_type is not None:
+            try:
+                await apply_extra_fields_setting(db, entity_type, body)
+            except ValueError as e:
+                return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
+        else:
+            try:
+                definition.validate_type(body)
+            except ValueError as e:
+                return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
+            await setting.update(db=db, definition=definition, value=body)
         logger.info('Setting "%s" has been set to "%s".', key, body)
     else:
-        await setting.delete(db=db, definition=definition)
+        if entity_type is not None:
+            await reset_extra_fields(db, entity_type)
+        else:
+            await setting.delete(db=db, definition=definition)
         logger.info('Setting "%s" has been unset.', key)
 
     await db.commit()

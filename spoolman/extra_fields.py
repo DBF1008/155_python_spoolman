@@ -1,11 +1,12 @@
 """Custom/extra fields for spoolman entities."""
 
+import contextlib
 import json
 import logging
 from enum import Enum
 
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from spoolman.database import filament as db_filament
@@ -144,7 +145,24 @@ def validate_extra_field_dict(all_fields: list[ExtraField], fields_input: dict[s
             raise ValueError(f"Invalid extra field for key {key}: {e!s}") from None
 
 
-extra_field_cache = {}
+EXTRA_FIELD_SETTING_PREFIX = "extra_fields_"
+
+extra_field_cache: dict[EntityType, list[ExtraField]] = {}
+
+
+def setting_key_for_entity_type(entity_type: EntityType) -> str:
+    """Return the setting key that stores the extra fields for an entity type."""
+    return f"{EXTRA_FIELD_SETTING_PREFIX}{entity_type.name}"
+
+
+def entity_type_for_setting_key(key: str) -> EntityType | None:
+    """Return the entity type a setting key stores extra fields for, or None if it isn't such a key."""
+    if not key.startswith(EXTRA_FIELD_SETTING_PREFIX):
+        return None
+    try:
+        return EntityType(key[len(EXTRA_FIELD_SETTING_PREFIX) :])
+    except ValueError:
+        return None
 
 
 async def get_extra_fields(db: AsyncSession, entity_type: EntityType) -> list[ExtraField]:
@@ -152,7 +170,7 @@ async def get_extra_fields(db: AsyncSession, entity_type: EntityType) -> list[Ex
     if entity_type in extra_field_cache:
         return extra_field_cache[entity_type]
 
-    setting_def = parse_setting(f"extra_fields_{entity_type.name}")
+    setting_def = parse_setting(setting_key_for_entity_type(entity_type))
     try:
         setting = await db_setting.get(db, setting_def)
         setting_value = setting.value
@@ -169,38 +187,96 @@ async def get_extra_fields(db: AsyncSession, entity_type: EntityType) -> list[Ex
     return fields
 
 
-async def add_or_update_extra_field(db: AsyncSession, entity_type: EntityType, extra_field: ExtraField) -> None:
-    """Add or update an extra field for a specific entity type."""
-    validate_extra_field(extra_field)
+def _ensure_compatible_change(existing_field: ExtraField, new_field: ExtraField) -> None:
+    """Verify that changing an existing field would not break already-stored entity data."""
+    if existing_field.field_type != new_field.field_type:
+        raise ValueError("Field type cannot be changed.")
+    if new_field.field_type == ExtraFieldType.choice:
+        # Can't change multi choice since that would break existing data
+        if existing_field.multi_choice != new_field.multi_choice:
+            raise ValueError("Multi choice cannot be changed.")
 
-    extra_fields = await get_extra_fields(db, entity_type)
+        # Verify that we have only added new choices, not removed any
+        if (
+            existing_field.choices is not None
+            and new_field.choices is not None
+            and not all(choice in new_field.choices for choice in existing_field.choices)
+        ):
+            raise ValueError("Cannot remove existing choices.")
 
-    # If the field already exists, verify that we don't do anything that would break existing data
-    existing_field = next((field for field in extra_fields if field.key == extra_field.key), None)
-    if existing_field is not None:
-        if existing_field.field_type != extra_field.field_type:
-            raise ValueError("Field type cannot be changed.")
-        if extra_field.field_type == ExtraFieldType.choice:
-            # Can't change multi choice since that would break existing data
-            if existing_field.multi_choice != extra_field.multi_choice:
-                raise ValueError("Multi choice cannot be changed.")
 
-            # Verify that we have only added new choices, not removed any
-            if (
-                existing_field.choices is not None
-                and extra_field.choices is not None
-                and not all(choice in extra_field.choices for choice in existing_field.choices)
-            ):
-                raise ValueError("Cannot remove existing choices.")
+async def _clear_entity_field_values(db: AsyncSession, entity_type: EntityType, key: str) -> None:
+    """Delete the stored value of an extra field from every entity of the given type."""
+    if entity_type == EntityType.vendor:
+        await db_vendor.clear_extra_field(db, key)
+    elif entity_type == EntityType.filament:
+        await db_filament.clear_extra_field(db, key)
+    elif entity_type == EntityType.spool:
+        await db_spool.clear_extra_field(db, key)
+    else:
+        raise ValueError(f"Unknown entity type {entity_type.name}.")
 
-    extra_fields = [field for field in extra_fields if field.key != extra_field.key]
-    extra_fields.append(extra_field)
 
-    setting_def = parse_setting(f"extra_fields_{entity_type.name}")
-    await db_setting.update(db=db, definition=setting_def, value=json.dumps(jsonable_encoder(extra_fields)))
+async def replace_extra_fields(
+    db: AsyncSession,
+    entity_type: EntityType,
+    new_fields: list[ExtraField],
+    *,
+    validate_keys: set[str] | None = None,
+) -> list[ExtraField]:
+    """Replace the full set of extra fields for an entity type.
+
+    This is the single source of truth used both by the dedicated field endpoints and by direct writes
+    through the generic setting endpoint. It validates the new set, persists it (which also emits the
+    setting websocket event), refreshes the in-memory cache, and clears orphaned values for any fields
+    that were removed.
+
+    Args:
+        db: The database session.
+        entity_type: The entity type the fields belong to.
+        new_fields: The complete new list of extra fields.
+        validate_keys: If given, only structurally validate fields whose key is in this set. The
+            single-field callers use this so an unrelated, possibly pre-existing invalid field does not
+            block the operation. If None, every field is structurally validated.
+
+    Returns:
+        The new list of extra fields.
+
+    """
+    existing_fields = await get_extra_fields(db, entity_type)
+    existing_by_key = {field.key: field for field in existing_fields}
+
+    seen: set[str] = set()
+    for field in new_fields:
+        if field.key in seen:
+            raise ValueError(f"Duplicate extra field {field.key}.")
+        seen.add(field.key)
+        if validate_keys is None or field.key in validate_keys:
+            validate_extra_field(field)
+        existing_field = existing_by_key.get(field.key)
+        if existing_field is not None:
+            _ensure_compatible_change(existing_field, field)
+
+    setting_def = parse_setting(setting_key_for_entity_type(entity_type))
+    await db_setting.update(db=db, definition=setting_def, value=json.dumps(jsonable_encoder(new_fields)))
 
     # Update cache
-    extra_field_cache[entity_type] = extra_fields
+    extra_field_cache[entity_type] = new_fields
+
+    # Delete the stored values of any fields that were removed
+    for removed_key in set(existing_by_key) - seen:
+        await _clear_entity_field_values(db, entity_type, removed_key)
+
+    return new_fields
+
+
+async def add_or_update_extra_field(db: AsyncSession, entity_type: EntityType, extra_field: ExtraField) -> None:
+    """Add or update an extra field for a specific entity type."""
+    extra_fields = await get_extra_fields(db, entity_type)
+    new_fields = [field for field in extra_fields if field.key != extra_field.key]
+    new_fields.append(extra_field)
+
+    await replace_extra_fields(db, entity_type, new_fields, validate_keys={extra_field.key})
 
     logger.info("Added/updated extra field %s for entity type %s.", extra_field.key, entity_type.name)
 
@@ -213,25 +289,63 @@ async def delete_extra_field(db: AsyncSession, entity_type: EntityType, key: str
     if not any(field.key == key for field in extra_fields):
         raise ItemNotFoundError(f"Extra field with key {key} does not exist.")
 
-    extra_fields = [field for field in extra_fields if field.key != key]
+    new_fields = [field for field in extra_fields if field.key != key]
 
-    setting_def = parse_setting(f"extra_fields_{entity_type.name}")
-    await db_setting.update(db=db, definition=setting_def, value=json.dumps(jsonable_encoder(extra_fields)))
-
-    # Update cache
-    extra_field_cache[entity_type] = extra_fields
-
-    # Delete the extra field for all entities
-    if entity_type == EntityType.vendor:
-        await db_vendor.clear_extra_field(db, key)
-    elif entity_type == EntityType.filament:
-        await db_filament.clear_extra_field(db, key)
-    elif entity_type == EntityType.spool:
-        await db_spool.clear_extra_field(db, key)
-    else:
-        raise ValueError(f"Unknown entity type {entity_type.name}.")
+    # Nothing to structurally validate on delete; replace_extra_fields clears the removed field's values.
+    await replace_extra_fields(db, entity_type, new_fields, validate_keys=set())
 
     logger.info("Deleted extra field %s for entity type %s.", key, entity_type.name)
+
+
+async def apply_extra_fields_setting(db: AsyncSession, entity_type: EntityType, value: str) -> None:
+    """Apply a full extra-fields array supplied through the generic setting endpoint.
+
+    Routes the raw setting value through the same shared implementation as the field endpoints so that
+    validation, cache invalidation and orphaned-value cleanup all behave identically across both entry
+    points. Raises ValueError on any invalid input.
+    """
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError:
+        raise ValueError("Value is not valid JSON.") from None
+    if not isinstance(raw, list):
+        raise ValueError("Extra fields must be an array.")  # noqa: TRY004
+
+    new_fields: list[ExtraField] = []
+    for index, obj in enumerate(raw):
+        if not isinstance(obj, dict):
+            raise ValueError(f"Extra field at index {index} must be an object.")  # noqa: TRY004
+        # Force the entity type to match the setting key, mirroring the field endpoint.
+        data = {**obj, "entity_type": entity_type.value}
+        try:
+            new_fields.append(ExtraField.model_validate(data))
+        except ValidationError as e:
+            raise ValueError(f"Invalid extra field at index {index}: {e}") from None
+
+    await replace_extra_fields(db, entity_type, new_fields)
+
+
+async def reset_extra_fields(db: AsyncSession, entity_type: EntityType) -> None:
+    """Remove all extra fields for an entity type (mirrors un-setting the setting).
+
+    Deletes the underlying setting (emitting the DELETED event and leaving it unset), refreshes the cache
+    and clears the stored values of all previously-defined fields from every entity. Idempotent: if the
+    setting was never set it still ensures the cache and entity values are cleared.
+    """
+    existing_fields = await get_extra_fields(db, entity_type)
+
+    setting_def = parse_setting(setting_key_for_entity_type(entity_type))
+    # Already-unset is fine; we still clear the values and cache so the state stays consistent.
+    with contextlib.suppress(ItemNotFoundError):
+        await db_setting.delete(db=db, definition=setting_def)
+
+    # Update cache to the default (empty) value.
+    extra_field_cache[entity_type] = []
+
+    for field in existing_fields:
+        await _clear_entity_field_values(db, entity_type, field.key)
+
+    logger.info("Reset all extra fields for entity type %s.", entity_type.name)
 
 
 async def populate_with_defaults(db: AsyncSession, entity_type: EntityType, existing: dict[str, str]) -> None:
