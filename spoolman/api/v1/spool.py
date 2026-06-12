@@ -16,7 +16,7 @@ from spoolman.database import spool
 from spoolman.database.database import get_db_session
 from spoolman.database.utils import SortOrder
 from spoolman.exceptions import ItemCreateError, SpoolMeasureError
-from spoolman.extra_fields import EntityType, get_extra_fields, validate_extra_field_dict
+from spoolman.extra_fields import EntityType, get_extra_fields, populate_with_defaults, validate_extra_field_dict
 from spoolman.ws import websocket_manager
 
 logger = logging.getLogger(__name__)
@@ -389,10 +389,17 @@ async def create(  # noqa: ANN201
             content={"message": "Only specify either remaining_weight or used_weight."},
         )
 
-    if body.extra:
+    # Start with user-provided extra fields or empty dict
+    extra = body.extra if body.extra is not None else {}
+
+    # Populate missing fields with defaults from field definitions
+    await populate_with_defaults(db, EntityType.spool, extra)
+
+    # Validate the combined dict (user values + defaults)
+    if extra:
         all_fields = await get_extra_fields(db, EntityType.spool)
         try:
-            validate_extra_field_dict(all_fields, body.extra)
+            validate_extra_field_dict(all_fields, extra)
         except ValueError as e:
             return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
 
@@ -411,7 +418,7 @@ async def create(  # noqa: ANN201
             lot_nr=body.lot_nr,
             comment=body.comment,
             archived=body.archived,
-            extra=body.extra,
+            extra=extra if extra else None,
         )
         return Spool.from_db(db_item)
     except ItemCreateError:

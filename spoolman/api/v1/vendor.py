@@ -13,7 +13,7 @@ from spoolman.api.v1.models import Message, Vendor, VendorEvent
 from spoolman.database import vendor
 from spoolman.database.database import get_db_session
 from spoolman.database.utils import SortOrder
-from spoolman.extra_fields import EntityType, get_extra_fields, validate_extra_field_dict
+from spoolman.extra_fields import EntityType, get_extra_fields, populate_with_defaults, validate_extra_field_dict
 from spoolman.ws import websocket_manager
 
 router = APIRouter(
@@ -209,10 +209,17 @@ async def create(  # noqa: ANN201
     db: Annotated[AsyncSession, Depends(get_db_session)],
     body: VendorParameters,
 ):
-    if body.extra:
+    # Start with user-provided extra fields or empty dict
+    extra = body.extra if body.extra is not None else {}
+
+    # Populate missing fields with defaults from field definitions
+    await populate_with_defaults(db, EntityType.vendor, extra)
+
+    # Validate the combined dict (user values + defaults)
+    if extra:
         all_fields = await get_extra_fields(db, EntityType.vendor)
         try:
-            validate_extra_field_dict(all_fields, body.extra)
+            validate_extra_field_dict(all_fields, extra)
         except ValueError as e:
             return JSONResponse(status_code=400, content=Message(message=str(e)).model_dump())
 
@@ -222,7 +229,7 @@ async def create(  # noqa: ANN201
         comment=body.comment,
         empty_spool_weight=body.empty_spool_weight,
         external_id=body.external_id,
-        extra=body.extra,
+        extra=extra if extra else None,
     )
 
     return Vendor.from_db(db_item)
