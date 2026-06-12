@@ -45,14 +45,18 @@ class SubscriptionTree:
 
     async def send(self, path: tuple[str, ...], evt: Event) -> None:
         """Send a message to all websockets in this branch of the tree."""
-        # Broadcast to all subscribers on this level
-        for websocket in self.subscribers:
+        # Broadcast to all subscribers on this level. Iterate over a snapshot and
+        # collect any dead sockets, then prune them afterwards. Mutating the set
+        # while iterating it (or across an ``await``) would raise and abort the
+        # whole broadcast, starving the remaining subscribers and the child trees.
+        dead: set[WebSocket] = set()
+        for websocket in list(self.subscribers):
             if (
                 websocket.client_state == WebSocketState.DISCONNECTED  # noqa: PLR1714
                 or websocket.application_state == WebSocketState.DISCONNECTED
             ):
                 # A bad disconnection may have occurred
-                self.remove(path, websocket)
+                dead.add(websocket)
                 logger.info(
                     "Forcing disconnection of client %s on pool %s",
                     websocket.client.host if websocket.client else "?",
@@ -62,9 +66,23 @@ class SubscriptionTree:
                 websocket.client_state == WebSocketState.CONNECTED
                 and websocket.application_state == WebSocketState.CONNECTED
             ):
-                await websocket.send_text(evt.json())
+                try:
+                    await websocket.send_text(evt.json())
+                except Exception:  # noqa: BLE001
+                    # The socket reported as connected but the transport failed.
+                    # Drop it so one broken client cannot break the broadcast.
+                    dead.add(websocket)
+                    logger.info(
+                        "Dropping client %s on pool %s after a failed send",
+                        websocket.client.host if websocket.client else "?",
+                        ",".join(path),
+                    )
 
-        # Send the message further down the tree
+        # Prune the dead sockets from this level's subscribers.
+        self.subscribers.difference_update(dead)
+
+        # Always continue down the tree, even if a subscriber on this level had to
+        # be cleaned up, so resource-level listeners keep receiving events.
         if len(path) > 0 and path[0] in self.children:
             await self.children[path[0]].send(path[1:], evt)
 
