@@ -234,12 +234,17 @@ async def delete_extra_field(db: AsyncSession, entity_type: EntityType, key: str
     logger.info("Deleted extra field %s for entity type %s.", key, entity_type.name)
 
 
-async def populate_with_defaults(db: AsyncSession, entity_type: EntityType, existing: dict[str, str]) -> None:
-    """Populate the given list of extra fields with defaults."""
-    extra_fields = await get_extra_fields(db, entity_type)
-    for extra_field in extra_fields:
-        if extra_field.default_value is None:
+def populate_with_defaults(all_fields: list[ExtraField], existing: dict[str, str]) -> None:
+    """Fill in default values for extra fields the caller did not provide.
+
+    Mutates ``existing`` in place. Fields without a configured default value, and fields whose
+    key is already present in ``existing`` (i.e. explicitly provided by the caller), are left
+    untouched so manually-supplied values always take precedence. Fields that have been deleted
+    are simply absent from ``all_fields`` and therefore never re-populated.
+    """
+    for field in all_fields:
+        if field.default_value is None:
             continue
-        if extra_field.key in existing:
+        if field.key in existing:
             continue
-        existing[extra_field.key] = extra_field.default_value
+        existing[field.key] = field.default_value

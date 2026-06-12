@@ -15,7 +15,12 @@ from spoolman.database import filament
 from spoolman.database.database import get_db_session
 from spoolman.database.utils import SortOrder
 from spoolman.exceptions import ItemDeleteError
-from spoolman.extra_fields import EntityType, get_extra_fields, validate_extra_field_dict
+from spoolman.extra_fields import (
+    EntityType,
+    get_extra_fields,
+    populate_with_defaults,
+    validate_extra_field_dict,
+)
 from spoolman.ws import websocket_manager
 
 logger = logging.getLogger(__name__)
@@ -433,12 +438,14 @@ async def create(  # noqa: ANN201
     db: Annotated[AsyncSession, Depends(get_db_session)],
     body: FilamentParameters,
 ):
+    all_fields = await get_extra_fields(db, EntityType.filament)
+    extra = dict(body.extra) if body.extra else {}
     if body.extra:
-        all_fields = await get_extra_fields(db, EntityType.filament)
         try:
-            validate_extra_field_dict(all_fields, body.extra)
+            validate_extra_field_dict(all_fields, extra)
         except ValueError as e:
             return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
+    populate_with_defaults(all_fields, extra)
 
     db_item = await filament.create(
         db=db,
@@ -458,7 +465,7 @@ async def create(  # noqa: ANN201
         multi_color_hexes=body.multi_color_hexes,
         multi_color_direction=body.multi_color_direction,
         external_id=body.external_id,
-        extra=body.extra,
+        extra=extra,
     )
 
     return Filament.from_db(db_item)
