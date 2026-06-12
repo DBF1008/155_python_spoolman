@@ -1,0 +1,66 @@
+{
+    "actions": {
+        "list": "Kuva",
+        "create": "Loo",
+        "edit": "Muuda",
+        "show": "Näita",
+        "clone": "Klooni"
+    },
+    "buttons": {
+        "create": "Loo",
+        "save": "Salvesta",
+        "confirm": "Oled kindel?",
+        "clear": "Tühjenda",
+        "refresh": "Uuenda",
+        "show": "Näita",
+        "hideColumns": "Peida tulbad",
+        "clearFilters": "Tühjenda filtrid",
+        "edit": "Muuda",
+        "undo": "Võta tagasi",
+        "clone": "Klooni",
+        "archive": "Arhiveeri",
+        "notAccessTitle": "Sul pole õigusi sisenemiseks",
+        "saveAndAdd": "Salvesta ja Lisa",
+        "logout": "Logi välja",
+        "delete": "Kustuta",
+        "cancel": "Tühista",
+        "import": "Impordi",
+        "filter": "Filtreeri",
+        "unArchive": "Võta arhiivist tagasi",
+        "hideArchived": "Peida arhiveeritud",
+        "showArchived": "Näita arhiveeritud",
+        "continue": "Jätka"
+    },
+    "notifications": {
+        "error": "Viga (kood: {{statusCode}})",
+        "undoable": "Sul on {{seconds}} sekundit, et muudatus tagasi võtta.",
+        "success": "Õnnestunud",
+        "createSuccess": "Loodi {{resource}}",
+        "createError": "Tekkis viga {{resource}} loomisel. (staatuse kood: {{statusCode}})",
+        "deleteSuccess": "Edukalt kustutatud {{resource}}",
+        "deleteError": "Viga {{resource}} kustutamisel. (staatuse kood: {{statusCode}})",
+        "editSuccess": "Edukalt muudetud {{resource}}",
+        "editError": "Viga {{resource}} muutmisel (staatuse kood: {{statusCode}})",
+        "importProgress": "Importimine: {{processed}}/{{total}}",
+        "saveSuccessful": "Salvesta edukalt!",
+        "validationError": "Viga validerimisel: {{error}}"
+    },
+    "warnWhenUnsavedChanges": "Oled sa kindel, et soovid lahkuda? Sul on salvestamata muudatusi.",
+    "kofi": "Anna mulle tippi Ko-fi's",
+    "loading": "Laadimine",
+    "version": "Versioon",
+    "unknown": "Tundmatu",
+    "yes": "Jah",
+    "no": "Ei",
+    "tags": {
+        "clone": "Klooni"
+    },
+    "dashboard": {
+        "title": "Juhtpaneel"
+    },
+    "printing": {
+        "generic": {
+            "title": "Trükkib"
+        }
+    }
+}
