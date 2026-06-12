@@ -384,6 +384,43 @@ class BackupResponse(BaseModel):
     )
 
 
+class ExternalSyncStatus(BaseModel):
+    """Status of the last external DB sync operation."""
+
+    last_sync: SpoolmanDateTime | None = Field(
+        default=None,
+        description="Timestamp of the last complete sync attempt (success or failure).",
+    )
+    last_sync_success: bool | None = Field(
+        default=None,
+        description="Whether the last sync attempt succeeded. None if no sync has been attempted.",
+    )
+    last_sync_duration_seconds: float | None = Field(
+        default=None,
+        description="Duration of the last sync attempt in seconds.",
+    )
+    last_sync_filament_count: int | None = Field(
+        default=None,
+        description="Number of filaments in the last successful sync.",
+    )
+    last_sync_material_count: int | None = Field(
+        default=None,
+        description="Number of materials in the last successful sync.",
+    )
+    external_db_url: str = Field(
+        default="",
+        description="The configured external DB URL.",
+    )
+    last_error: str | None = Field(
+        default=None,
+        description="Error message from the last failed sync attempt.",
+    )
+    is_syncing: bool = Field(
+        default=False,
+        description="Whether a sync is currently in progress.",
+    )
+
+
 class EventType(str, Enum):
     """Event types."""
 

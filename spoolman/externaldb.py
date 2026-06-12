@@ -1,8 +1,10 @@
 """Functions for syncing data from an external database of manufacturers, filaments, materials, etc."""
 
+import asyncio
 import datetime
 import logging
 import os
+import time
 from collections.abc import Iterator
 from enum import Enum
 from pathlib import Path
@@ -129,6 +131,61 @@ def get_external_db_sync_interval() -> int:
     return int(os.getenv("EXTERNAL_DB_SYNC_INTERVAL", DEFAULT_SYNC_INTERVAL))
 
 
+class SyncStatus(BaseModel):
+    """Status of the last external DB sync operation."""
+
+    last_sync: datetime.datetime | None = Field(
+        default=None,
+        description="Timestamp of the last completed sync attempt (success or failure).",
+    )
+    last_sync_success: bool | None = Field(
+        default=None,
+        description="Whether the last sync attempt succeeded. None if no sync has been attempted.",
+    )
+    last_sync_duration_seconds: float | None = Field(
+        default=None,
+        description="Duration of the last sync attempt in seconds.",
+    )
+    last_sync_filament_count: int | None = Field(
+        default=None,
+        description="Number of filaments synced in the last successful sync.",
+    )
+    last_sync_material_count: int | None = Field(
+        default=None,
+        description="Number of materials synced in the last successful sync.",
+    )
+    external_db_url: str = Field(
+        default="",
+        description="The configured external DB URL.",
+    )
+    last_error: str | None = Field(
+        default=None,
+        description="Error message from the last failed sync attempt. None if the last sync succeeded.",
+    )
+    is_syncing: bool = Field(
+        default=False,
+        description="Whether a sync operation is currently in progress.",
+    )
+
+
+# Module-level sync state
+_sync_status = SyncStatus(external_db_url=get_external_db_url())
+_sync_lock_instance: asyncio.Lock | None = None
+
+
+def _get_sync_lock() -> asyncio.Lock:
+    """Lazily create the asyncio lock to avoid event loop issues."""
+    global _sync_lock_instance  # noqa: PLW0603
+    if _sync_lock_instance is None:
+        _sync_lock_instance = asyncio.Lock()
+    return _sync_lock_instance
+
+
+def get_sync_status() -> SyncStatus:
+    """Return a copy of the current sync status."""
+    return _sync_status.model_copy()
+
+
 async def _download_file(url: str) -> bytes:
     """Download a file from a URL and return the contents as a string.
 
@@ -166,21 +223,83 @@ def get_materials_file() -> Path:
 
 
 async def _sync() -> None:
-    logger.info("Syncing external DB.")
+    """Download and parse external DB files, writing them to the local cache.
+
+    On success, the local cache files are updated atomically.
+    On failure, the old cache files are left untouched and the error is recorded in the sync status.
+    """
+    global _sync_status  # noqa: PLW0603
 
     url = get_external_db_url()
+    _sync_status = _sync_status.model_copy(update={"external_db_url": url, "is_syncing": True})
+    start_time = time.monotonic()
 
-    filaments = _parse_filaments_from_bytes(await _download_file(urljoin(url, "filaments.json")))
-    materials = _parse_materials_from_bytes(await _download_file(urljoin(url, "materials.json")))
+    try:
+        logger.info("Syncing external DB from %s", url)
 
-    _write_to_local_cache("filaments.json", filaments.json().encode())
-    _write_to_local_cache("materials.json", materials.json().encode())
+        filaments = _parse_filaments_from_bytes(await _download_file(urljoin(url, "filaments.json")))
+        materials = _parse_materials_from_bytes(await _download_file(urljoin(url, "materials.json")))
 
-    logger.info(
-        "External DB synced. Filaments: %d, Materials: %d",
-        len(filaments.root),
-        len(materials.root),
-    )
+        # Only write to cache after both files are successfully downloaded and parsed.
+        # This ensures that a failure mid-sync does not leave the cache in a partially-updated state.
+        _write_to_local_cache("filaments.json", filaments.json().encode())
+        _write_to_local_cache("materials.json", materials.json().encode())
+
+        duration = time.monotonic() - start_time
+        _sync_status = SyncStatus(
+            last_sync=datetime.datetime.now(datetime.timezone.utc),
+            last_sync_success=True,
+            last_sync_duration_seconds=round(duration, 3),
+            last_sync_filament_count=len(filaments.root),
+            last_sync_material_count=len(materials.root),
+            external_db_url=url,
+            last_error=None,
+            is_syncing=False,
+        )
+
+        logger.info(
+            "External DB synced. Filaments: %d, Materials: %d (%.2fs)",
+            len(filaments.root),
+            len(materials.root),
+            duration,
+        )
+    except Exception as exc:
+        duration = time.monotonic() - start_time
+        error_message = str(exc)
+        _sync_status = _sync_status.model_copy(
+            update={
+                "last_sync": datetime.datetime.now(datetime.timezone.utc),
+                "last_sync_success": False,
+                "last_sync_duration_seconds": round(duration, 3),
+                "last_error": error_message,
+                "is_syncing": False,
+            }
+        )
+        logger.exception("Failed to sync external DB: %s", error_message)
+
+
+async def refresh(timeout: float = 30.0) -> SyncStatus:
+    """Manually trigger an external DB sync.
+
+    Args:
+        timeout: Maximum time in seconds to wait for the sync to complete.
+
+    Returns:
+        The sync status after the refresh completes.
+
+    Raises:
+        RuntimeError: If a sync is already in progress.
+        asyncio.TimeoutError: If the sync does not complete within the timeout.
+
+    """
+    lock = _get_sync_lock()
+    if lock.locked():
+        raise RuntimeError("A sync is already in progress.")
+
+    async with lock:
+        await asyncio.wait_for(_sync(), timeout=timeout)
+
+    return get_sync_status()
 
 
 def schedule_tasks(scheduler: Scheduler) -> None:
