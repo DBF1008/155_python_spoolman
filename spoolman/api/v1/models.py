@@ -48,6 +48,32 @@ class SettingKV(BaseModel):
         )
 
 
+class LocationOverview(BaseModel):
+    """Overview of a single location with spool metadata."""
+
+    name: str = Field(
+        description="Location name. Empty string represents the 'no location' bucket.",
+        examples=["Shelf A"],
+    )
+    spool_count: int = Field(
+        ge=0,
+        description="Number of spools in this location.",
+        examples=[5],
+    )
+    spool_ids: list[int] = Field(
+        description=(
+            "Ordered list of spool IDs in this location. "
+            "Order comes from the locations_spoolorders setting if configured, "
+            "otherwise spools are listed by ascending ID."
+        ),
+        examples=[[5, 2, 8]],
+    )
+    is_empty_location: bool = Field(
+        description="Whether this is the special empty/no-location bucket.",
+        examples=[False],
+    )
+
+
 class Vendor(BaseModel):
     id: int = Field(description="Unique internal ID of this vendor.")
     registered: SpoolmanDateTime = Field(description="When the vendor was registered in the database. UTC Timezone.")

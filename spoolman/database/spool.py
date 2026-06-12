@@ -426,6 +426,45 @@ async def find_locations(
     return [row[0] for row in rows.all() if row[0] is not None]
 
 
+async def find_locations_overview(
+    *,
+    db: AsyncSession,
+    allow_archived: bool = False,
+) -> dict[str, list[int]]:
+    """Find all locations with their spool IDs.
+
+    Returns a dict mapping location name to list of spool IDs.
+    The empty location (NULL or "") is mapped to the key "".
+    Archived spools are excluded unless allow_archived is True.
+    Spool IDs within each location are sorted ascending.
+    """
+    stmt = sqlalchemy.select(models.Spool.id, models.Spool.location)
+
+    if not allow_archived:
+        stmt = stmt.where(
+            sqlalchemy.or_(
+                models.Spool.archived.is_(False),
+                models.Spool.archived.is_(None),
+            ),
+        )
+
+    stmt = stmt.order_by(models.Spool.id.asc())
+
+    rows = await db.execute(stmt)
+
+    result: dict[str, list[int]] = {}
+    for row in rows.all():
+        spool_id = row[0]
+        location = row[1]
+        # Normalize NULL and "" both to ""
+        loc_key = location or ""
+        if loc_key not in result:
+            result[loc_key] = []
+        result[loc_key].append(spool_id)
+
+    return result
+
+
 async def find_lot_numbers(
     *,
     db: AsyncSession,
