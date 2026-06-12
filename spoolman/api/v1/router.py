@@ -100,6 +100,10 @@ async def notify(
             if await websocket.receive_text():
                 await websocket.send_json({"status": "healthy"})
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Unexpected error on root websocket", exc_info=True)
+    finally:
         websocket_manager.disconnect((), websocket)
 
 

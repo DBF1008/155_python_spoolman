@@ -1,5 +1,6 @@
 """Helper functions for interacting with vendor database objects."""
 
+import logging
 from datetime import datetime
 
 from sqlalchemy import select
@@ -10,6 +11,8 @@ from spoolman.database import models
 from spoolman.exceptions import ItemNotFoundError
 from spoolman.settings import SettingDefinition
 from spoolman.ws import websocket_manager
+
+logger = logging.getLogger(__name__)
 
 SETTING_MAX_LENGTH = 2**16 - 1
 
@@ -57,12 +60,16 @@ async def delete(db: AsyncSession, definition: SettingDefinition) -> None:
 
 async def setting_changed(definition: SettingDefinition, set_value: str | None, typ: EventType) -> None:
     """Notify websocket clients that a setting has changed."""
-    await websocket_manager.send(
-        ("setting", str(definition.key)),
-        SettingEvent(
-            type=typ,
-            resource="setting",
-            date=datetime.utcnow(),
-            payload=SettingKV.from_db(definition, set_value),
-        ),
-    )
+    try:
+        await websocket_manager.send(
+            ("setting", str(definition.key)),
+            SettingEvent(
+                type=typ,
+                resource="setting",
+                date=datetime.utcnow(),
+                payload=SettingKV.from_db(definition, set_value),
+            ),
+        )
+    except Exception:
+        # Important to have a catch-all here since we don't want to stop the call if this fails.
+        logger.exception("Failed to send websocket message")

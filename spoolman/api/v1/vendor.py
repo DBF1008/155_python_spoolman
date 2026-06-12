@@ -1,6 +1,7 @@
 """Vendor related endpoints."""
 
 import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -20,6 +21,8 @@ router = APIRouter(
     prefix="/vendor",
     tags=["vendor"],
 )
+
+logger = logging.getLogger(__name__)
 
 # ruff: noqa: D103
 
@@ -157,6 +160,10 @@ async def notify_any(
             if await websocket.receive_text():
                 await websocket.send_json({"status": "healthy"})
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Unexpected error on vendor websocket", exc_info=True)
+    finally:
         websocket_manager.disconnect(("vendor",), websocket)
 
 
@@ -194,6 +201,10 @@ async def notify(
             if await websocket.receive_text():
                 await websocket.send_json({"status": "healthy"})
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Unexpected error on vendor %d websocket", vendor_id, exc_info=True)
+    finally:
         websocket_manager.disconnect(("vendor", str(vendor_id)), websocket)
 
 

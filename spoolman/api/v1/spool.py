@@ -325,6 +325,10 @@ async def notify_any(
             if await websocket.receive_text():
                 await websocket.send_json({"status": "healthy"})
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Unexpected error on spool websocket", exc_info=True)
+    finally:
         websocket_manager.disconnect(("spool",), websocket)
 
 
@@ -362,6 +366,10 @@ async def notify(
             if await websocket.receive_text():
                 await websocket.send_json({"status": "healthy"})
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Unexpected error on spool %d websocket", spool_id, exc_info=True)
+    finally:
         websocket_manager.disconnect(("spool", str(spool_id)), websocket)
 
 
