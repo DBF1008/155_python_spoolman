@@ -144,7 +144,148 @@ def validate_extra_field_dict(all_fields: list[ExtraField], fields_input: dict[s
             raise ValueError(f"Invalid extra field for key {key}: {e!s}") from None
 
 
-extra_field_cache = {}
+extra_field_cache: dict[EntityType, list[ExtraField]] = {}
+
+
+def invalidate_cache(entity_type: EntityType | None = None) -> None:
+    """Invalidate the extra field cache for a specific entity type or all types.
+
+    Args:
+        entity_type: The entity type to invalidate. If None, invalidate all.
+    """
+    if entity_type is None:
+        extra_field_cache.clear()
+    elif entity_type in extra_field_cache:
+        del extra_field_cache[entity_type]
+    logger.info("Invalidated extra field cache for %s.", entity_type.name if entity_type else "all")
+
+
+def _get_entity_type_from_setting_key(key: str) -> EntityType | None:
+    """Extract entity type from a setting key like 'extra_fields_vendor'.
+
+    Returns None if the key is not an extra_fields setting.
+    """
+    prefix = "extra_fields_"
+    if not key.startswith(prefix):
+        return None
+    entity_name = key[len(prefix):]
+    try:
+        return EntityType(entity_name)
+    except ValueError:
+        return None
+
+
+async def _clear_removed_field_values(db: AsyncSession, entity_type: EntityType, removed_keys: list[str]) -> None:
+    """Clear field values for keys that have been removed from the definition."""
+    for key in removed_keys:
+        if entity_type == EntityType.vendor:
+            await db_vendor.clear_extra_field(db, key)
+        elif entity_type == EntityType.filament:
+            await db_filament.clear_extra_field(db, key)
+        elif entity_type == EntityType.spool:
+            await db_spool.clear_extra_field(db, key)
+        logger.info("Cleared values for removed extra field %s (entity type: %s).", key, entity_type.name)
+
+
+async def sync_extra_fields_from_raw_value(
+    db: AsyncSession,
+    entity_type: EntityType,
+    raw_value: str,
+) -> list[ExtraField]:
+    """Sync extra fields from a raw JSON value (as would be written via Setting API).
+
+    This function:
+    1. Parses and validates each field definition
+    2. Detects removed fields and clears their values from EAV tables
+    3. Updates the in-memory cache
+
+    Args:
+        db: Database session
+        entity_type: The entity type these fields belong to
+        raw_value: Raw JSON string containing the field definitions array
+
+    Returns:
+        The list of validated ExtraField objects
+
+    Raises:
+        ValueError: If the value is not a valid array or contains invalid field definitions
+    """
+    # Parse the raw JSON value
+    try:
+        setting_array = json.loads(raw_value)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON: {e}") from None
+
+    if not isinstance(setting_array, list):
+        raise ValueError("Extra fields setting must be an array.")
+
+    # Parse and validate each field definition
+    new_fields: list[ExtraField] = []
+    for obj in setting_array:
+        try:
+            field = ExtraField.parse_obj(obj)
+        except Exception as e:
+            raise ValueError(f"Invalid field definition: {e}") from None
+        validate_extra_field(field)
+        new_fields.append(field)
+
+    # Get current fields to detect removals
+    current_fields = extra_field_cache.get(entity_type, [])
+    current_keys = {f.key for f in current_fields}
+    new_keys = {f.key for f in new_fields}
+    removed_keys = current_keys - new_keys
+
+    # Clear values for removed fields
+    if removed_keys:
+        await _clear_removed_field_values(db, entity_type, list(removed_keys))
+
+    # Update cache
+    extra_field_cache[entity_type] = new_fields
+
+    logger.info(
+        "Synced extra fields for %s: %d fields, %d removed.",
+        entity_type.name,
+        len(new_fields),
+        len(removed_keys),
+    )
+    return new_fields
+
+
+async def handle_setting_update(
+    db: AsyncSession,
+    setting_key: str,
+    value: str | None,
+) -> bool:
+    """Handle a setting update that might be an extra_fields setting.
+
+    This is the entry point for the Setting API to notify extra_fields about changes.
+    It should be called after the setting has been written to the database.
+
+    Args:
+        db: Database session
+        setting_key: The setting key (e.g., "extra_fields_vendor")
+        value: The new value (JSON string), or None if deleted
+
+    Returns:
+        True if this was an extra_fields setting and was handled, False otherwise
+    """
+    entity_type = _get_entity_type_from_setting_key(setting_key)
+    if entity_type is None:
+        return False
+
+    if value is None:
+        # Setting was deleted - clear all fields and their values
+        current_fields = extra_field_cache.get(entity_type, [])
+        if current_fields:
+            all_keys = [f.key for f in current_fields]
+            await _clear_removed_field_values(db, entity_type, all_keys)
+        extra_field_cache[entity_type] = []
+        logger.info("Cleared all extra fields for %s (setting deleted).", entity_type.name)
+    else:
+        # Setting was updated - sync and handle removals
+        await sync_extra_fields_from_raw_value(db, entity_type, value)
+
+    return True
 
 
 async def get_extra_fields(db: AsyncSession, entity_type: EntityType) -> list[ExtraField]:
@@ -221,15 +362,8 @@ async def delete_extra_field(db: AsyncSession, entity_type: EntityType, key: str
     # Update cache
     extra_field_cache[entity_type] = extra_fields
 
-    # Delete the extra field for all entities
-    if entity_type == EntityType.vendor:
-        await db_vendor.clear_extra_field(db, key)
-    elif entity_type == EntityType.filament:
-        await db_filament.clear_extra_field(db, key)
-    elif entity_type == EntityType.spool:
-        await db_spool.clear_extra_field(db, key)
-    else:
-        raise ValueError(f"Unknown entity type {entity_type.name}.")
+    # Delete the extra field values for all entities
+    await _clear_removed_field_values(db, entity_type, [key])
 
     logger.info("Deleted extra field %s for entity type %s.", key, entity_type.name)
 

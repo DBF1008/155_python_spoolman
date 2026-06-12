@@ -12,6 +12,7 @@ from spoolman.api.v1.models import Message, SettingEvent, SettingResponse
 from spoolman.database import setting
 from spoolman.database.database import get_db_session
 from spoolman.exceptions import ItemNotFoundError
+from spoolman.extra_fields import handle_setting_update
 from spoolman.settings import SETTINGS, parse_setting
 from spoolman.ws import websocket_manager
 
@@ -164,6 +165,7 @@ async def update(
     except ValueError as e:
         return JSONResponse(status_code=404, content=Message(message=str(e)).dict())
 
+    new_value: str | None = None
     if body and body != "null":
         try:
             definition.validate_type(body)
@@ -171,10 +173,17 @@ async def update(
             return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
 
         await setting.update(db=db, definition=definition, value=body)
+        new_value = body
         logger.info('Setting "%s" has been set to "%s".', key, body)
     else:
         await setting.delete(db=db, definition=definition)
         logger.info('Setting "%s" has been unset.', key)
+
+    # Handle extra_fields settings: sync cache and cascade clear removed field values
+    try:
+        await handle_setting_update(db, key, new_value)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content=Message(message=str(e)).dict())
 
     await db.commit()
 
