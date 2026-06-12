@@ -1,5 +1,6 @@
 """Helper functions for interacting with spool database objects."""
 
+import json
 import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -11,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, joinedload
 from sqlalchemy.sql.functions import coalesce
 
-from spoolman.api.v1.models import EventType, Spool, SpoolEvent
-from spoolman.database import filament, models
+from spoolman.api.v1.models import EventType, LocationOverviewEntry, Spool, SpoolEvent
+from spoolman.database import filament, models, setting
 from spoolman.database.utils import (
     SortOrder,
     add_where_clause_int,
@@ -22,7 +23,9 @@ from spoolman.database.utils import (
     parse_nested_field,
 )
 from spoolman.exceptions import ItemCreateError, ItemNotFoundError, SpoolMeasureError
+from spoolman.locations import build_location_overview
 from spoolman.math import weight_from_length
+from spoolman.settings import parse_setting
 from spoolman.ws import websocket_manager
 
 logger = logging.getLogger(__name__)
@@ -424,6 +427,62 @@ async def find_locations(
     stmt = sqlalchemy.select(models.Spool.location).distinct()
     rows = await db.execute(stmt)
     return [row[0] for row in rows.all() if row[0] is not None]
+
+
+async def _read_setting_json(db: AsyncSession, key: str, fallback: object) -> object:
+    """Read a setting value as parsed JSON, falling back on a missing or invalid value."""
+    definition = parse_setting(key)
+    try:
+        raw = (await setting.get(db, definition)).value
+    except ItemNotFoundError:
+        raw = definition.default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return fallback
+
+
+async def get_location_overview(
+    *,
+    db: AsyncSession,
+) -> list[LocationOverviewEntry]:
+    """Return the merged overview of configured locations and the real spool distribution.
+
+    Combines the ``locations`` and ``locations_spoolorders`` settings with the actual
+    non-archived spool locations into a single ordered list, each entry carrying its spool
+    count, the resolved spool display order, and whether it is the default empty location.
+    See :func:`spoolman.locations.build_location_overview` for the exact ordering rules.
+    """
+    configured_locations = await _read_setting_json(db, "locations", [])
+    if not isinstance(configured_locations, list):
+        configured_locations = []
+
+    locations_spoolorders = await _read_setting_json(db, "locations_spoolorders", {})
+    if not isinstance(locations_spoolorders, dict):
+        locations_spoolorders = {}
+
+    stmt = (
+        sqlalchemy.select(models.Spool.id, models.Spool.location)
+        .where(
+            sqlalchemy.or_(
+                models.Spool.archived.is_(False),
+                models.Spool.archived.is_(None),
+            ),
+        )
+        .order_by(models.Spool.id.asc())
+    )
+    rows = await db.execute(stmt)
+    spools = [(row[0], row[1]) for row in rows.all()]
+
+    return [
+        LocationOverviewEntry(
+            name=entry.name,
+            is_default=entry.is_default,
+            spool_count=entry.spool_count,
+            spool_orders=entry.spool_orders,
+        )
+        for entry in build_location_overview(configured_locations, locations_spoolorders, spools)
+    ]
 
 
 async def find_lot_numbers(

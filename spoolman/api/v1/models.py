@@ -360,6 +360,35 @@ class Spool(BaseModel):
         )
 
 
+class LocationOverviewEntry(BaseModel):
+    """A single location in the merged location overview."""
+
+    name: str = Field(
+        description=(
+            "Location name. An empty string represents the default location, "
+            "i.e. the bucket for spools that have no location set."
+        ),
+        examples=["Shelf A"],
+    )
+    is_default: bool = Field(
+        description="Whether this is the default location (the bucket for spools without a location).",
+    )
+    spool_count: int = Field(
+        ge=0,
+        description="Number of non-archived spools currently in this location.",
+        examples=[3],
+    )
+    spool_orders: list[int] = Field(
+        description=(
+            "IDs of the non-archived spools in this location, in display order. "
+            "This resolves the 'locations_spoolorders' setting against the spools actually present: "
+            "spools listed in that setting come first in the configured order, the rest follow by ascending ID. "
+            "Always has the same length as spool_count."
+        ),
+        examples=[[5, 3, 8]],
+    )
+
+
 class Info(BaseModel):
     version: str = Field(examples=["0.7.0"])
     debug_mode: bool = Field(examples=[False])

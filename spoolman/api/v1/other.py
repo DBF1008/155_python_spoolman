@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, RootModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from spoolman.api.v1.models import LocationOverviewEntry
 from spoolman.database import filament, spool
 from spoolman.database.database import get_db_session
 
@@ -124,6 +125,39 @@ async def find_locations(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[str]:
     return await spool.find_locations(db=db)
+
+
+@router.get(
+    "/location-overview",
+    name="Get location overview",
+    description=(
+        "Get a merged overview of all spool locations. This combines the configured locations "
+        "(the 'locations' setting) with the locations spools are actually stored in, returned in display order. "
+        "Each entry includes the number of non-archived spools in the location, those spools' IDs in display "
+        "order (resolving the 'locations_spoolorders' setting), and whether it is the default location used "
+        "for spools that have no location set."
+    ),
+    response_model_exclude_none=True,
+    responses={
+        200: {
+            "description": "A merged, ordered list of locations.",
+            "content": {
+                "application/json": {
+                    "example": [
+                        {"name": "", "is_default": True, "spool_count": 2, "spool_orders": [4, 6]},
+                        {"name": "Printer 1", "is_default": False, "spool_count": 1, "spool_orders": [7]},
+                        {"name": "Storage Shelf A", "is_default": False, "spool_count": 0, "spool_orders": []},
+                    ],
+                },
+            },
+        },
+    },
+)
+async def get_location_overview(
+    *,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> list[LocationOverviewEntry]:
+    return await spool.get_location_overview(db=db)
 
 
 class RenameLocationBody(BaseModel):
