@@ -1,9 +1,11 @@
 """Functions for syncing data from an external database of manufacturers, filaments, materials, etc."""
 
+import asyncio
 import datetime
 import logging
 import os
 from collections.abc import Iterator
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urljoin
@@ -165,22 +167,88 @@ def get_materials_file() -> Path:
     return filecache.get_file("materials.json")
 
 
+def _utcnow() -> datetime.datetime:
+    """Return the current time as a timezone-aware UTC datetime."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+@dataclass
+class SyncStatus:
+    """Status of the most recent external DB synchronization attempt since server start.
+
+    Lets callers judge whether the locally cached external data is fresh.
+    """
+
+    is_syncing: bool = False
+    last_attempt: datetime.datetime | None = None
+    last_success: datetime.datetime | None = None
+    success: bool | None = None
+    error: str | None = None
+    source_url: str | None = None
+    filament_count: int | None = None
+    material_count: int | None = None
+
+
+_sync_status = SyncStatus()
+_sync_lock = asyncio.Lock()
+
+
+def get_sync_status() -> SyncStatus:
+    """Return the status of the most recent external DB sync attempt."""
+    return _sync_status
+
+
 async def _sync() -> None:
-    logger.info("Syncing external DB.")
+    # Serialize syncs so a manual refresh and the scheduled sync (or two manual refreshes) can never
+    # interleave their writes to the shared cache files.
+    async with _sync_lock:
+        url = get_external_db_url()
+        _sync_status.is_syncing = True
+        _sync_status.last_attempt = _utcnow()
+        _sync_status.source_url = url
+        try:
+            logger.info("Syncing external DB.")
 
-    url = get_external_db_url()
+            filaments = _parse_filaments_from_bytes(await _download_file(urljoin(url, "filaments.json")))
+            materials = _parse_materials_from_bytes(await _download_file(urljoin(url, "materials.json")))
 
-    filaments = _parse_filaments_from_bytes(await _download_file(urljoin(url, "filaments.json")))
-    materials = _parse_materials_from_bytes(await _download_file(urljoin(url, "materials.json")))
+            # Only write once both files have been downloaded and parsed successfully. This keeps the
+            # local cache updated all-or-nothing: a failed sync leaves the previous cache intact, so the
+            # read-only endpoints keep serving the last known-good data.
+            _write_to_local_cache("filaments.json", filaments.json().encode())
+            _write_to_local_cache("materials.json", materials.json().encode())
+        except Exception as exc:  # noqa: BLE001
+            # Record the failure but re-raise so the scheduler keeps its existing behaviour.
+            _sync_status.success = False
+            _sync_status.error = str(exc) or exc.__class__.__name__
+            raise
+        else:
+            _sync_status.success = True
+            _sync_status.error = None
+            _sync_status.last_success = _utcnow()
+            _sync_status.filament_count = len(filaments.root)
+            _sync_status.material_count = len(materials.root)
+            logger.info(
+                "External DB synced. Filaments: %d, Materials: %d",
+                len(filaments.root),
+                len(materials.root),
+            )
+        finally:
+            _sync_status.is_syncing = False
 
-    _write_to_local_cache("filaments.json", filaments.json().encode())
-    _write_to_local_cache("materials.json", materials.json().encode())
 
-    logger.info(
-        "External DB synced. Filaments: %d, Materials: %d",
-        len(filaments.root),
-        len(materials.root),
-    )
+async def refresh_now() -> SyncStatus:
+    """Trigger an external DB sync immediately and return the resulting status.
+
+    Unlike the scheduled sync, this never raises on failure: any error is recorded in the returned
+    status and the previously cached files are left untouched, so the read-only endpoints keep
+    serving the last known-good data.
+    """
+    try:
+        await _sync()
+    except Exception:  # noqa: BLE001
+        logger.warning("Manual external DB refresh failed; existing cache retained.", exc_info=True)
+    return get_sync_status()
 
 
 def schedule_tasks(scheduler: Scheduler) -> None:
